@@ -19,15 +19,34 @@ var (
 )
 
 
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
 	defer fmt.Print("> ")
-	return gs.HandlePause
+	var pauseClosure = func (routing routing.PlayingState) pubsub.AckType  {
+		gs.HandlePause(routing)
+		return  pubsub.Ack
+	}
+	return pauseClosure
 }
+
+func handlerMove(gs *gamelogic.GameState) func(gamelogic.ArmyMove) pubsub.AckType {
+	defer fmt.Print("> ")
+	var moveClosure = func(move gamelogic.ArmyMove) pubsub.AckType {
+		result := gs.HandleMove(move)
+		if result == gamelogic.MoveOutComeSafe || 
+		result == gamelogic.MoveOutcomeMakeWar{
+			return pubsub.Ack
+		}
+		return pubsub.NackDiscard
+	  }
+	return moveClosure
+}
+
 
 
 func main() {
 	fmt.Println("Starting Peril client...")
 	conn, err := amqp.Dial(*uri)
+	channel, _ := conn.Channel()
 	defer conn.Close()
 	if err != nil {
 		ErrLog.Fatalf("producer: error in dial: %s", err)
@@ -46,12 +65,33 @@ func main() {
 	}
 	fmt.Printf("Queue %v declared and bound!\n", queue.Name)
 
+
+	_, moveQueue, err1 := pubsub.DeclareAndBind(
+		conn,
+		routing.ExchangePerilTopic,
+		routing.ArmyMovesPrefix + "." + username,
+		routing.ArmyMovesPrefix + ".*",
+		pubsub.Transient,
+	)
+	if err1 != nil {
+		log.Fatalf("could not subscribe to pause: %v", err)
+	}
+	fmt.Printf("Queue %v declared and bound!\n", moveQueue.Name)
+
+
 	gs := gamelogic.NewGameState(username)
 
-	gandlePauseFunc := handlerPause(gs)
+	handlePauseFunc := handlerPause(gs)
+	handleMoveFunc := handlerMove(gs)
 
 	pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, routing.PauseKey+"."+username, routing.PauseKey,
- 	pubsub.Transient, gandlePauseFunc)
+ 	pubsub.Transient, handlePauseFunc)
+
+	pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, routing.ArmyMovesPrefix+"."+username, 
+	routing.ArmyMovesPrefix + ".*",
+ 	pubsub.Transient, handleMoveFunc)
+
+
 
 	for {
 		words := gamelogic.GetInput()
@@ -60,13 +100,20 @@ func main() {
 		}
 		switch words[0] {
 		case "move":
-			_, err := gs.CommandMove(words)
+			armyMove, err := gs.CommandMove(words)
 			if err != nil {
 				fmt.Println(err)
 				continue
 			}
 
-			// TODO: publish the move
+			errorMove := pubsub.PublishJSON(channel, routing.ExchangePerilTopic, 
+				routing.ArmyMovesPrefix + "." + username, 
+				armyMove)
+			if errorMove != nil {
+				Log.Fatalln(errorMove)	
+			} else {
+				Log.Printf("Successfully published a move: %v \n", armyMove)
+			}
 		case "spawn":
 			err = gs.CommandSpawn(words)
 			if err != nil {

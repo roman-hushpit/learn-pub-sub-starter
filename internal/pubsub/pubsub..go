@@ -14,10 +14,18 @@ type QueueType int
 const (
 	Durable QueueType = iota
 	Transient
+) 
+
+type AckType int
+
+const (
+	Ack 		AckType = iota
+	NackRequeue
+	NackDiscard
 )
 
 //, wg *sync.WaitGroup
-func StartConsumer[T any](deliveries <-chan amqp.Delivery, handler func(T)) {
+func StartConsumer[T any](deliveries <-chan amqp.Delivery, handler func(T) AckType) {
 	//defer wg.Done()
 	for delivery := range deliveries {
 		var msg T
@@ -29,12 +37,30 @@ func StartConsumer[T any](deliveries <-chan amqp.Delivery, handler func(T)) {
 		}
 
 		// Call the handler function with the unmarshalled message
-		handler(msg)
+		acknoledge := handler(msg)
 
 		// Acknowledge the message
-		err = delivery.Ack(false)
-		if err != nil {
-			log.Printf("Error acknowledging message: %v", err)
+
+		if acknoledge == Ack {
+			err = delivery.Ack(false)
+			if err != nil {
+				log.Printf("Error acknowledging message: %v", err)
+			}
+			log.Println("Message ack")
+		}
+		if acknoledge == NackRequeue {
+			err = delivery.Nack(false, true)
+			if err != nil {
+				log.Printf("Error acknowledging message: %v", err)
+			}
+			log.Println("Message Nack(false, true)")
+		}
+		if acknoledge == NackDiscard {
+			err = delivery.Nack(false, false)
+			if err != nil {
+				log.Printf("Error acknowledging message: %v", err)
+			}
+			log.Println("Message Nack(false, false)")
 		}
 	}
 }
@@ -46,7 +72,7 @@ func SubscribeJSON[T any](
 	queueName,
 	key string,
 	queueType QueueType,
-	handler func(T),
+	handler func(T) AckType,
 ) error {
 	channel, queue, _ := DeclareAndBind(conn, exchange, queueName, key, queueType)
 	deliveries, _ := channel.Consume(queue.Name, "", false, false, false, false, nil)
@@ -87,7 +113,9 @@ func DeclareAndBind(
 		return nil, amqp.Queue{}, err
 	}
 	queue, err := channel.QueueDeclare(queueName, simpleQueueType == Durable, simpleQueueType == Transient, 
-		simpleQueueType == Transient, false, nil)
+		simpleQueueType == Transient, false, amqp.Table{
+			"x-dead-letter-exchange": "peril_dlx",
+		})
 	fmt.Println(queue.Name)
 	if err != nil {
 		return nil, amqp.Queue{}, err
