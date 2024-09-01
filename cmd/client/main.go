@@ -19,6 +19,11 @@ var (
 )
 
 
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	defer fmt.Print("> ")
+	return gs.HandlePause
+}
+
 
 func main() {
 	fmt.Println("Starting Peril client...")
@@ -42,6 +47,11 @@ func main() {
 	fmt.Printf("Queue %v declared and bound!\n", queue.Name)
 
 	gs := gamelogic.NewGameState(username)
+
+	gandlePauseFunc := handlerPause(gs)
+
+	pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, routing.PauseKey+"."+username, routing.PauseKey,
+ 	pubsub.Transient, gandlePauseFunc)
 
 	for {
 		words := gamelogic.GetInput()
